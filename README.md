@@ -2,7 +2,7 @@
 
 This repository is for BDSI 2024's Cancer Data Science radius-specific Cox models group (members: Razmin Bari, Niharika Ghosh, Josephine Kaminaga).
 
-Our project aims to answer how the spatial clustering of immune and tumor cells in ovarian cancer patients influences patient survival. All analyses, including the calculation of spatial statistics for the imaged patient biopsies, can be reproduced in the R markdown file within this repository. A version of our patient dataset which includes only the final covariates we used in our survival models can also be found in the data folder, as running the spatial statistics is rather time-consuming.
+Our project aims to answer how the spatial clustering of immune and tumor cells in ovarian cancer patients influences patient survival. All analyses, including the calculation of spatial statistics for the imaged patient biopsies, can be reproduced in the R markdown file within this repository. A version of our patient dataset which includes only the final covariates we used in our survival models can be found in the data folder and loaded instead of running the spatial statistic calculations, as these are rather time-consuming.
 
 All of our data is originally from multiplex immunofluorescence images taken of 128 ovarian cancer patients, processed using Akoya Biosciences Vectra 3 and Vectra Polaris imaging platforms. More information on our data can be found [here.](https://bioconductor.org/packages/release/data/experiment/vignettes/VectraPolarisData/inst/doc/VectraPolarisData.html)
 
