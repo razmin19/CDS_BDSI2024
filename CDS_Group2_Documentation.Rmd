@@ -1,0 +1,721 @@
+---
+title: "team_eNeRJayy_doc"
+author: "Josephine Kaminaga, Niharika Ghosh, Razmin Bari"
+date: "2024-07-11"
+output: html_document
+---
+Loading necessary libraries for the project
+```{r Loading Libraries}
+set.seed(280)
+library(tidyverse)
+# library(devtools)
+# devtools::install_github("junsoukchoi/MItools")
+library(MItools)
+library(survival)
+library(survminer)
+library(glmnet)
+library(paletteer)
+library(stringr)
+```
+
+Load and pre-process ovarian imaging data
+```{r Loading Data}
+ov <- readRDS("data/ovarianData.RDS")
+ov_MD <- ov$ovarian_metadata
+ov_cells <- ov$ovarian_cells
+
+ov_data_total <- left_join(ov_data, ov_MD, by="sample_id")
+ov_data_total <- ov_data_total %>% mutate(parpi_inhibitor = case_when( 
+                                          parpi_inhibitor == "Y" ~ 1,
+                                          parpi_inhibitor == "N" ~ 0))
+
+ov_data_total <- ov_data_total %>% select(
+  -diagnosis, -recurrent, -tma, -stage, -grade,
+  -time_to_recurrence, -debulking, -BRCA_mutation) # remove non-important variables
+# as determined by EDA
+
+# For loading completed dataframe instead of running
+# spatial statistic calculations
+# ov_data_total <- read.csv("data/Ov_data_final.csv", stringsAsFactors=T)
+```
+
+Add second-order spatial statistic columns to data
+```{r Setting Up Dataframe}
+phenos <- unique((ov_data_total %>% filter(!(pheno %in% "Other")))$pheno)
+
+combs <- combn(phenos, 2)
+
+# create distinct dataset w/ one row for each patient
+ov_unique <- ov_total %>% select(sample_id) %>% distinct()
+
+strings <- apply(combs, 2, function(x) gsub(" ", "_", paste0(x, collapse="_")))
+phenos <- sub(" ", "_", phenos)
+
+# add each possible cell type combination at different radii to data
+for (str in strings) {
+  y <- paste0(str, "_K20")
+  a <- paste0(str, "_K30")
+  b <- paste0(str, "_K40")
+  c <- paste0(str, "_K50")
+  ov_unique[[y]] <- NA
+  ov_unique[[a]] <- NA
+  ov_unique[[b]] <- NA
+  ov_unique[[c]] <- NA
+}
+
+# add each cell type at different radii to data
+for (str in phenos) {
+  y <- paste0(str, "_K20")
+  a <- paste0(str, "_K30")
+  b <- paste0(str, "_K40")
+  c <- paste0(str, "_K50")
+  ov_data_total[[y]] <- NA
+  ov_data_total[[a]] <- NA
+  ov_data_total[[b]] <- NA
+  ov_data_total[[c]] <- NA
+}
+
+# add cell proportion columns to dataframe
+ov_unique$tumor_prop <- NA
+ov_unique$macro_prop <- NA
+ov_unique$cyto_prop <- NA
+ov_unique$thelp_prop <- NA
+ov_unique$bcell_prop <- NA
+```
+
+Defining helper functions for spatial statistic calculations
+```{r Helper Functions}
+check_counts <- function(pheno, to_count) {
+  return (sum(pheno == to_count) < 6)
+}
+
+calc_props <- function(pheno, type) {
+  return ( 
+    sum(pheno %in% type) / length(pheno)
+    )
+}
+```
+
+Calculating K-cross and K-est measures for each cell combination
+```{r Calculating Spatial Statistics}
+for (id in 1:nrow(ov_unique)) {
+  temp <- ov_data_total %>% filter(sample_id==unique(sample_id)[id])
+  img_ppp <- multitype.pp(temp$x, temp$y, temp$pheno)
+  
+  ov_unique$tumor_prop[id] <- calc_props(temp$pheno, "Tumor")
+  ov_unique$macro_prop[id] <- calc_props(temp$pheno, "Macrophage")
+  ov_unique$cyto_prop[id] <- calc_props(temp$pheno, "Cytotoxic T")
+  ov_unique$thelp_prop[id] <- calc_props(temp$pheno, "T Helper")
+  ov_unique$bcell_prop[id] <- calc_props(temp$pheno, "B Cell")
+  
+  # first for loop calculates the K-cross functions for each combination
+  for (i in 1:10) {
+    # check for counts
+    # if either cell type has less than 6 instances in the image, skip
+    cell_one <- combs[1, i]
+    cell_two <- combs[2, i]
+    if (check_counts(temp$pheno, cell_one) | 
+        check_counts(temp$pheno, cell_two)) next
+    
+    Kcross_val <- MItools::envelope(img_ppp, MItools::Kcross,
+                                    funargs=list(i=cell_one,
+                                                 j=cell_two), nsim=39)
+    # vector of K-cross values for different radii
+    diffs <- Kcross_val$obs - Kcross_val$theo
+    
+    cell_one_sub <- gsub(" ", "_", cell_one)
+    cell_two_sub <- gsub(" ", "_", cell_two)
+
+    # put into dataframe
+    ov_unique[[paste(cell_one_sub, cell_two_sub, "K20", sep="_")]][id] <-
+      diffs[which.min(abs(Kcross_val$r - 20))]
+    ov_unique[[paste(cell_one_sub, cell_two_sub, "K30", sep="_")]][id] <-
+      diffs[which.min(abs(Kcross_val$r - 30))]
+    ov_unique[[paste(cell_one_sub, cell_two_sub, "K40", sep="_")]][id] <-
+      diffs[which.min(abs(Kcross_val$r - 40))]
+    ov_unique[[paste(cell_one_sub, cell_two_sub, "K50", sep="_")]][id] <-
+      diffs[which.min(abs(Kcross_val$r - 50))]
+  }
+  
+  # second for loop calculates K-estimates values for each cell type
+  for (i in 1:5) {
+    # check for counts
+    cell_type <- phenos[i]
+    if (check_counts(temp$pheno, cell_type)) next
+    
+    Kest_val <- MItools::permute.envelope(img_ppp, MItools::Kest,
+                                    funargs=list(i=cell_type), nsim=39)
+    
+    # vector of K-est values for different radii
+    diffs <- Kest_val$obs - Kest_val$mmean
+    
+    cell_type_sub <- gsub(" ", "_", cell_type)
+    
+    # put into dataframe
+    ov_unique[[paste(cell_type_sub, "K20", sep="_")]][id] <-
+      diffs[which.min(abs(Kest_val$r - 20))]
+    ov_unique[[paste(cell_type_sub, "K30", sep="_")]][id] <-
+      diffs[which.min(abs(Kest_val$r - 30))]
+    ov_unique[[paste(cell_type_sub, "K40", sep="_")]][id] <-
+      diffs[which.min(abs(Kest_val$r - 40))]
+    ov_unique[[paste(cell_type_sub, "K50", sep="_")]][id] <-
+      diffs[which.min(abs(Kest_val$r - 50))]
+  }
+}
+
+write.csv(ov_unique, "ov_data_spatial.csv", row.names=F)
+```
+
+Find which columns have more than 10% NA values and drop them from data
+```{r Post-Processing Data}
+keep_cols <- ov_data_total %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "column", values_to = "num_na") %>%
+  filter(num_na < 13) %>%
+  pull(column)
+
+# looks like the columns w/ more than 10% NA values are all
+# T-Helper and B Cells
+
+ov_data_total <- ov_data_total %>%
+      select(-contains("T_Helper")) %>% select(-contains("B_Cell"))
+
+write.csv(ov_data_total, "ov_data_final.csv", row.names=F)
+```
+
+Using 100-fold cross validation Cox regression models with elastic net to examine variable significance in the Cox regression model context. Elastic net used to reduce multicollinearity.
+```{r Multi-Radii Survival Models}
+ov_data_total <- ov_data_total %>% drop_na()
+set.seed(280)
+
+# Used to store variables selected + their effects on hazard
+elasticnet_vars <- vector()
+sign <- list(vector(), vector())
+names(sign) <- c("Positive", "Negative")
+
+# Used for calculating average concordance of model
+cindeces <- vector()
+
+train <- ov_data_total %>% select(-sample_id)
+xmatr <- as.matrix(train %>% select(-death, -survival_time))
+ymatr <- Surv(train$survival_time, train$death)
+
+for (i in 1:100) {
+  print(i)
+  # running glmnet elasticnet fit 100 times
+  cur_fit <- cv.glmnet(xmatr, ymatr, family="cox", type.measure="C", alpha=0.5)
+  coefs <- coef(cur_fit, s=cur_fit$lambda.min)
+  mat <- as.matrix(coefs)
+  # extracts covariates that were not zero
+  cur_vars <- as.vector(names(which(mat[,1] != 0)))
+  
+  # Adding variable effects to storage
+  for (n in 1:nrow(mat)) {
+    if (mat[n] == 0) next
+    if (mat[n] < 0) {
+      sign$Negative <- c(sign$Negative, rownames(mat)[n])
+    }
+    else {
+      sign$Positive <- c(sign$Positive, rownames(mat)[n])
+    }
+  }
+  
+  # Storing current selected variables
+  elasticnet_vars <- c(elasticnet_vars, cur_vars)
+  cindeces <- c(cindeces, max(cur_fit$cvm))
+}
+
+mean(cindeces)
+```
+
+Helper function for plotting
+```{r More Helper Functions}
+combine_df <- function(elasticnet_vars, sign) {
+  x <- as.data.frame(table(elasticnet_vars))
+  x$Freq <- (x$Freq / 100)
+  
+  y <- full_join(as.data.frame(table(sign$Positive)), 
+                 as.data.frame(-table(sign$Negative)),
+                 by="Var1")
+  
+  y <- y %>% replace(is.na(.), 0)
+  y$freq <- y$Freq.x + y$Freq.y
+  y <- y %>% select(Var1, freq)
+  y <- y %>% arrange(freq, descending=T) %>% filter(freq != 0)
+  
+  colnames(y) <- c("elasticnet_vars", "freq")
+  y$Sign <- case_when(y$freq < 0 ~ "Negative",
+                      y$freq > 0 ~ "Positive")
+  y <- y %>% select(-freq)
+  
+  x <- left_join(x, y, by="elasticnet_vars")
+  
+  return (x)
+}
+```
+
+Graphing variable significance for the 100-fold cross validated Cox model
+```{r Graphing Multi-Radii Results}
+plotting <- combine_df(elasticnet_vars, sign) %>% arrange(-Freq)
+
+plotting <- plotting %>% filter(Freq > 0.096) %>%
+  select(elasticnet_vars, Freq, Sign)
+
+# Changing covariate names to something more plottable
+full_df <- plotting %>% mutate(elasticnet_vars = gsub("_", " ", elasticnet_vars)) %>%
+          mutate(elasticnet_vars =
+                   case_when(elasticnet_vars=="age at diagnosis" ~ "Age at Diagnosis",
+                      elasticnet_vars=="primary" ~ "Primary Tumor",
+                      elasticnet_vars=="treatment effect" ~ "Chemotherapy",
+                      elasticnet_vars=="tumor prop" ~ "Prop. of Tumor Cells",
+                      elasticnet_vars=="Cytotoxic T K50" ~ 
+                        "Cytotoxic T Clustering (50 μm)",
+                      elasticnet_vars=="Tumor K20" ~ "Tumor Clustering (20 μm)",
+                      elasticnet_vars=="Macrophage Cytotoxic T K40" ~
+                               "Macrophage-Cytotoxic T\nClustering (40 μm)",
+                      elasticnet_vars=="Tumor Macrophage K50" ~ 
+                               "Tumor-Macrophage Clustering 50 μm",
+                      elasticnet_vars=="Tumor Cytotoxic T K30" ~
+                               "Tumor-Cytotoxic T Clustering 30 μm",
+                      elasticnet_vars=="Tumor Cytotoxic T K20" ~
+                        "Tumor-Cytotoxic T Clustering 20",
+                      elasticnet_vars=="b prop" ~ "BCell Prop",
+                      elasticnet_vars=="cyto prop" ~ "Cyto Prop",
+                      elasticnet_vars=="Macrophage K20" ~ "Macrophage Clustering 20μm",
+                      elasticnet_vars=="th prop" ~ "T-Helper Cell Prop.",
+                      elasticnet_vars=="macro prop" ~ "Prop. of Macrophages",
+                      elasticnet_vars=="bcell prop" ~ "Prop. of B Cells",
+                      elasticnet_vars=="cyto prop" ~ "Prop. of Cytotoxic T Cells",
+                      elasticnet_vars=="Cytotoxic T K20" ~ "Cytotoxic T Clustering 20μm",
+                      elasticnet_vars=="Macrophage Cytotoxic T K30" ~
+                        "Macrophage-Cytotoxic T Clustering 30 μm",
+                      elasticnet_vars=="Macrophage Cytotoxic T K50" ~
+                        "Macrophage-Cytotoxic T Clustering 50 μm",
+                      elasticnet_vars=="Tumor Macrophage K20" ~
+                        "Tumor-Macrophage Clustering 20 μm",
+                      elasticnet_vars=="Tumor Macrophage K30" ~
+                        "Tumor-Macrophage Clustering 30 μm",
+                      elasticnet_vars=="parpi inhibitor" ~ "PARPi Inhibitor",
+                      elasticnet_vars=="Tumor K30" ~ "Tumor Clustering (30 μm)",
+                      elasticnet_vars=="Cytotoxic T K40" ~ "Cytotoxic T Clustering (40 μm)",
+                      elasticnet_vars=="Tumor K40" ~ "Tumor Clustering (40 μm)"))
+
+full_df_sorted <- (full_df %>% mutate(rcolfill = case_when(Freq > 0.75 ~
+                                                     elasticnet_vars,
+                              TRUE ~ "Low Frequency Selection")) %>%
+        arrange(desc(Freq)))[1:18,]
+
+lev <- c("Cytotoxic T Clustering (50 μm)", "T-Helper Cell Prop.",
+         "Tumor Clustering (20 μm)", "Age at Diagnosis",
+         "Macrophage-Cytotoxic T\nClustering (40 μm)",
+         "Primary Tumor", "Tumor Clustering (30 μm)", "Chemotherapy", 
+         "Cytotoxic T Clustering (40 μm)",
+         "Low Frequency Selection")
+
+# Custom sorting for the legend
+full_df_sorted$rcolfill <- factor(full_df_sorted$rcolfill,
+                                    levels=lev)
+full_df_sorted$Sign <- factor(full_df_sorted$Sign,
+                              levels = c("Positive", "Negative"))
+
+group.cols <- c("#C969A1FF", "#CE4441FF", "#EE8577FF", "#EB7926FF", "#FFBB44FF", "#859B6CFF", "#62929AFF", "#004F63FF", "#744893", "#878787")
+
+full_df_sorted %>% ggplot(aes(x=reorder(elasticnet_vars, -Freq), 
+                        y=Freq, fill=rcolfill)) + geom_col() +
+  geom_point(aes(x=reorder(elasticnet_vars, -Freq), y=Freq,
+                 shape=Sign), size=3, col="black") + 
+  labs(x="", y="Inclusion Frequency") +
+  theme_classic() + 
+  theme(axis.text.x = element_blank(), axis.ticks.x=element_blank()) +
+  labs(fill="Covariate", shape="Influence on Patient Hazard") + 
+  ggtitle("Inclusion Frequency of Ovarian Cancer Covariates") +
+  scale_fill_manual(values=group.cols) +
+  guides(fill = guide_legend(override.aes = list(shape = NA)))
+
+ggsave("cox elastic net.png")
+```
+
+Fitting 4 different Cox models on the 20/30/40/50 micron radii levels
+Running 100 iterations of glmnet fit for each radius
+```{r Fitting Single-Radii Models}
+# Creating data frames for each radius
+data_k20 <- ov_data_total %>% select(age_at_diagnosis, primary,
+                              death, survival_time,
+                              treatment_effect, tumor_prop, th_prop,
+                              macro_prop, cyto_prop, b_prop,
+                              parpi_inhibitor,
+                              contains("20"))
+data_k30 <- ov_data_total %>% select(age_at_diagnosis, primary,
+                              treatment_effect, tumor_prop, th_prop,
+                              macro_prop, cyto_prop, b_prop,
+                              parpi_inhibitor,
+                              death, survival_time,
+                              contains("30"))
+data_k40 <- ov_data_total %>% select(age_at_diagnosis, primary,
+                              treatment_effect, tumor_prop, parpi_inhibitor,
+                              death, survival_time, th_prop,
+                              macro_prop, cyto_prop, b_prop,
+                              contains("40"))
+data_k50 <- ov_data_total %>% select(age_at_diagnosis, primary,
+                              treatment_effect, tumor_prop, parpi_inhibitor,
+                              death, survival_time, th_prop,
+                              macro_prop, cyto_prop, b_prop,
+                              contains("50"))
+
+# For storage of variables selected
+elasticnet_vars_20 <- vector()
+elasticnet_vars_30 <- vector()
+elasticnet_vars_40 <- vector()
+elasticnet_vars_50 <- vector()
+sign20 <- list(vector(), vector())
+names(sign20) <- c("Positive", "Negative")
+sign30 <- list(vector(), vector())
+names(sign30) <- c("Positive", "Negative")
+sign40 <- list(vector(), vector())
+names(sign40) <- c("Positive", "Negative")
+sign50 <- list(vector(), vector())
+names(sign50) <- c("Positive", "Negative")
+
+# Average concordance scores for each radius
+cindeces_20 <- vector()
+cindeces_30 <- vector()
+cindeces_40 <- vector()
+cindeces_50 <- vector()
+
+xmatr20 <- as.matrix(data_k20 %>% select(-death, -survival_time))
+ymatr20 <- Surv(data_k20$survival_time, data_k20$death)
+xmatr30 <- as.matrix(data_k30 %>% select(-death, -survival_time))
+ymatr30 <- Surv(data_k30$survival_time, data_k30$death)
+xmatr40 <- as.matrix(data_k40 %>% select(-death, -survival_time))
+ymatr40 <- Surv(data_k40$survival_time, data_k40$death)
+xmatr50 <- as.matrix(data_k50 %>% select(-death, -survival_time))
+ymatr50 <- Surv(data_k50$survival_time, data_k50$death)
+
+for (i in 1:100) {
+  # Process here for every radius is the same as the
+  # full Cox model
+  print(i)
+  cur_fit20 <- cv.glmnet(xmatr20, ymatr20, family="cox", type.measure="C",
+                         alpha=0.5)
+  coefs20 <- coef(cur_fit20, s=cur_fit20$lambda.min)
+  mat20 <- as.matrix(coefs20)
+  cur_vars20 <- as.vector(names(which(mat20[,1] != 0)))
+  for (i in 1:nrow(mat20)) {
+    if (mat20[i] == 0) next
+    if (mat20[i] < 0) {
+      sign20$Negative <- c(sign20$Negative, rownames(mat20)[i])
+    }
+    else {
+      sign20$Positive <- c(sign20$Positive, rownames(mat20)[i])
+    }
+  }
+  
+  cur_fit30 <- cv.glmnet(xmatr30, ymatr30, family="cox", type.measure="C",
+                         alpha=0.5)
+  coefs30 <- coef(cur_fit30, s=cur_fit30$lambda.min)
+  mat30 <- as.matrix(coefs30)
+  cur_vars30 <- as.vector(names(which(mat30[,1] != 0)))
+  for (i in 1:nrow(mat30)) {
+    if (mat30[i] == 0) next
+    if (mat30[i] < 0) {
+      sign30$Negative <- c(sign30$Negative, rownames(mat30)[i])
+    }
+    else {
+      sign30$Positive <- c(sign30$Positive, rownames(mat30)[i])
+    }
+  }
+  
+  cur_fit40 <- cv.glmnet(xmatr40, ymatr40, family="cox", type.measure="C",
+                         alpha=0.5)
+  coefs40 <- coef(cur_fit40, s=cur_fit40$lambda.min)
+  mat40 <- as.matrix(coefs40)
+  cur_vars40 <- as.vector(names(which(mat40[,1] != 0)))
+  for (i in 1:nrow(mat40)) {
+    if (mat40[i] == 0) next
+    if (mat40[i] < 0) {
+      sign40$Negative <- c(sign40$Negative, rownames(mat40)[i])
+    }
+    else {
+      sign40$Positive <- c(sign40$Positive, rownames(mat40)[i])
+    }
+  }
+  
+  cur_fit50 <- cv.glmnet(xmatr50, ymatr50, family="cox", type.measure="C",
+                         alpha=0.5)
+  coefs50 <- coef(cur_fit50, s=cur_fit50$lambda.min)
+  mat50 <- as.matrix(coefs50)
+  cur_vars50 <- as.vector(names(which(mat50[,1] != 0)))
+  for (i in 1:nrow(mat50)) {
+    if (mat50[i] == 0) next
+    if (mat50[i] < 0) {
+      sign50$Negative <- c(sign50$Negative, rownames(mat50)[i])
+    }
+    else {
+      sign50$Positive <- c(sign50$Positive, rownames(mat50)[i])
+    }
+  }
+
+  elasticnet_vars_20 <- c(elasticnet_vars_20, cur_vars20)
+  elasticnet_vars_30 <- c(elasticnet_vars_30, cur_vars30)
+  elasticnet_vars_40 <- c(elasticnet_vars_40, cur_vars40)
+  elasticnet_vars_50 <- c(elasticnet_vars_50, cur_vars50)
+  
+  cindeces_20 <- c(cindeces_20, max(cur_fit20$cvm))
+  cindeces_30 <- c(cindeces_30, max(cur_fit30$cvm))
+  cindeces_40 <- c(cindeces_40, max(cur_fit40$cvm))
+  cindeces_50 <- c(cindeces_20, max(cur_fit50$cvm))
+}
+
+x20 <- combine_df(elasticnet_vars_20, sign20) %>% arrange(-Freq)
+x30 <- combine_df(elasticnet_vars_30, sign30) %>% arrange(-Freq)
+x40 <- combine_df(elasticnet_vars_40, sign40) %>% arrange(-Freq)
+x50 <- combine_df(elasticnet_vars_50, sign50) %>% arrange(-Freq)
+```
+
+Graphing the variables selected for each of the radii
+```{r Graphing Single-Radii Model Results}
+x20$radius <- rep(20, times=nrow(x20))
+x30$radius <- rep(30, times=nrow(x30))
+x40$radius <- rep(40, times=nrow(x40))
+x50$radius <- rep(50, times=nrow(x50))
+
+full_df <- rbind(x20, x30, x40, x50)
+full_df_ordered <- full_df %>% group_by(radius) %>% filter(Freq > 0.65) %>%
+    mutate(position=rank(Freq, ties.method="first")) %>%
+  mutate(elasticnet_vars = gsub("_", " ", elasticnet_vars)) %>%
+  mutate(elasticnet_vars = case_when( grepl("K", elasticnet_vars) ~ str_sub(elasticnet_vars,1,-4),
+                                         TRUE ~ elasticnet_vars)) %>%
+  mutate(elasticnet_vars = case_when(elasticnet_vars=="age at diagnosis" ~ "Age at Diagnosis",
+                             elasticnet_vars=="primary" ~ "Primary Tumor",
+                             elasticnet_vars=="treatment effect" ~ "Chemotherapy",
+                             elasticnet_vars=="tumor prop" ~ "Proportion of Tumor Cells",
+                             elasticnet_vars=="th prop" ~ "T-Helper Cell Prop.",
+                             elasticnet_vars=="Cytotoxic T " ~ "Cytotoxic T Clustering",
+                             elasticnet_vars=="Tumor " ~ "Tumor Clustering",
+                             elasticnet_vars=="Macrophage Cytotoxic T " ~
+                               "Macrophage-Cytotoxic T\nClustering",
+                             elasticnet_vars=="Tumor Macrophage " ~ 
+                               "Tumor-Macrophage Clustering",
+                             elasticnet_vars=="Tumor Cytotoxic T " ~
+                               "Tumor-Cytotoxic T Clustering",
+                             elasticnet_vars=="Macrophage " ~ "Macrophage Clustering",
+                             elasticnet_vars=="Macrophage-Cytotoxic T Clustering" ~
+                                  "Macrophage-Cytotoxic T Clustering",)) 
+full_df_ordered$Sign <- factor(full_df_ordered$Sign,
+                              levels = c("Positive", "Negative"))
+lev <- c("Age at Diagnosis", "Cytotoxic T Clustering", "T-Helper Cell Prop.",
+         "Tumor Clustering", "Primary Tumor",
+         "Macrophage-Cytotoxic T\nClustering",
+         "Chemotherapy")
+
+full_df_ordered$elasticnet_vars <- factor(full_df_ordered$elasticnet_vars,
+                                    levels=lev)
+
+group.cols <- c("#EB7926FF", "#C969A1FF", "#CE4441FF", "#EE8577FF", "#859B6CFF", "#FFBB44FF", "#62929AFF", "#878787")
+
+full_df_ordered <- full_df_ordered %>% select(Sign, elasticnet_vars, Freq, radius, position)
+
+full_df_ordered %>% ggplot(aes(x=reorder(elasticnet_vars,-Freq), y=Freq, 
+                               fill=elasticnet_vars)) +
+  geom_col(position="dodge", col="white") + 
+    geom_point(aes(x=reorder(elasticnet_vars, -Freq), y=Freq,
+                 shape=Sign), size=5, col="black") + 
+  theme_minimal() + 
+    theme(axis.text.x=element_blank(),
+        plot.title=element_text(size=20),
+        legend.key.size = unit(0.7, 'cm'),
+        legend.text = element_text(size=10),
+        legend.title=element_text(size=13)) + 
+  ggtitle("Inclusion Frequency by Cell Radius") +
+  labs(x="Interaction Radius in Microns", y="Selection Frequency",
+       fill="Covariate", shape="Influence on Patient Hazard") +
+    scale_fill_manual(values=group.cols) +
+  facet_wrap(vars(radius), strip.position="bottom") + 
+    guides(fill = guide_legend(override.aes = list(shape = NA) ) )
+
+ggsave("radii cox 4.png", width=9,height=6)
+?ggsave
+```
+
+Plotting some survival curves for various spatial covariates that were selected the most within the Cox models
+
+```{r Data For Survival Curves}
+# Setting up Cox survival model fit + base dataframe for plotting
+train <- ov_data_total %>% select(-sample_id)
+xmatr <- as.matrix(train %>% select(-death, -survival_time))
+ymatr <- Surv(train$survival_time, train$death)
+cur_fit <- cv.glmnet(xmatr, ymatr, family="cox", type.measure="C", alpha=0.5)
+
+temp <- ov_data_total %>% select(-sample_id, -death, -survival_time)
+
+fitdf <- as.data.frame(t(colMeans(temp)))
+
+fitdf$primary[1] <- 0
+fitdf$treatment_effect[1] <- 0
+fitdf$parpi_inhibitor[1] <- 0
+fitdf <- rbind(fitdf, fitdf[1,])
+```
+
+Cytotoxic T clustering at 50 μm
+```{r Cytotoxic T Survival Curves}
+cyto_df <- fitdf
+
+cyto_df$Cytotoxic_T_K50[1] <- quantile(ov_data_total$Cytotoxic_T_K50, 0.25)
+cyto_df$Cytotoxic_T_K50[2] <- quantile(ov_data_total$Cytotoxic_T_K50, 0.75)
+
+cytofit <- survfit(cur_fit, s=cur_fit$lambda.min,
+        x=xmatr, y=ymatr,
+        newx=as.matrix(cyto_df))
+
+ggsurvplot(cytofit, conf.int=TRUE, data=xmatr, main="Cytotoxic T Survival Curve",
+           legend.title = "Cytotoxic T Clustering (50 μm)",
+           legend.labs = c("< 25% Percentile", "> 75% Percentile"),
+           palette = c("#1b4585", "#f9c041"),
+           ggtheme=theme_classic(),
+           xlim=c(0, 150),
+           xlab="Time (months)")
+```
+
+
+Tumor clustering at 20 μm 
+```{r Tumor Clustering Survival Curves}
+tumor_df <- fitdf
+
+tumor_df$Tumor_K20[1] <- quantile(ov_data_total$Tumor_K20, 0.25)
+tumor_df$Tumor_K20[2] <- quantile(ov_data_total$Tumor_K20, 0.75)
+
+tumorfit <- survfit(cur_fit, s=cur_fit$lambda.min,
+                 x=xmatr, y=ymatr,
+                 newx=as.matrix(tumor_df))
+
+ggsurvplot(tumorfit, data=xmatr, main="Tumor Clustering Survival Curve",
+           legend.title = "Tumor Clustering Level",
+           legend.labs = c("25% Percentile", "75% Percentile"),
+           palette = c("#1b4585", "#f9c041"),
+           ggtheme=theme_grey())
+```
+
+Macrophage-Cytotoxic T clustering at 40 μm
+```{r Macropohage-Cytotoxic T Clustering Survival Curves}
+mc_df <- fitdf
+
+mc_df$Macrophage_Cytotoxic_T_K40[1] <- quantile(ov_data_total$Macrophage_Cytotoxic_T_K40, 0.25)
+mc_df$Macrophage_Cytotoxic_T_K40[2] <- quantile(ov_data_total$Macrophage_Cytotoxic_T_K40, 0.75)
+
+mcfit <- survfit(cur_fit, s=cur_fit$lambda.min,
+                 x=xmatr, y=ymatr,
+                 newx=as.matrix(mc_df))
+
+ggsurvplot(mcfit, data=xmatr, main="Macrophage-Cytotoxic T Survival Curve",
+           legend.title = "Macrophage-Cytotoxic T Clustering Level",
+           legend.labs = c("25% Percentile", "75% Percentile"),
+           xlab = "Time (months)",
+           palette = c("#1b4585", "#f9c041"),
+           ggtheme=theme_classic(),
+           xlim=c(0, 150))
+```
+
+T-Helper cell proportions
+```{r T-Helper Prop. Survival Curves}
+th_df <- fitdf
+
+th_df$th_prop[1] <- quantile(ov_data_total$th_prop, 0.25)
+th_df$th_prop[2] <- quantile(ov_data_total$th_prop, 0.75)
+
+th_fit <- survfit(cur_fit, s=cur_fit$lambda.min,
+                 x=xmatr, y=ymatr,
+                 newx=as.matrix(th_df))
+
+ggsurvplot(th_fit, conf.int=TRUE, data=xmatr, main="T-Helper Survival Curve",
+           legend.title = "T-Helper Cell Proportion Level",
+           legend.labs = c("25% Percentile", "75% Percentile"),
+           palette = c("#1b4585", "#f9c041"),
+           ggtheme=theme_classic(),
+           xlab = "Time (months)",
+           xlim=c(0, 150))
+```
+
+However, models fit with elastic net have variable shrinkage, which means that a lot of the effect sizes can't be seen with survival curves from an elastic net model.
+```{r Effect Size Survival Curves}
+mc_higher <- quantile(temp$Macrophage_Cytotoxic_T_K40, 0.75)
+mc_lower <- quantile(temp$Macrophage_Cytotoxic_T_K40, 0.25)
+
+mc_temp <- temp %>% mutate(mc_quant = 
+                             case_when(Macrophage_Cytotoxic_T_K40 >= mc_higher ~
+                                         "> 75% clustering",
+                                       Macrophage_Cytotoxic_T_K40 <= mc_lower ~
+                                         "< 25% clustering"))
+sum(mc_temp$mc_quant == "< 25% clustering", na.rm=T)
+
+mc_temp <- mc_temp %>% drop_na()
+mc_temp$mc_quant <- as.factor(mc_temp$mc_quant)
+
+
+mod <- survfit(Surv(time=survival_time, event=death) ~ mc_quant, data=mc_temp)
+
+ggsurvplot(mod,
+           pval = TRUE,
+           legend.title="Macrophage-Cytotoxic T Clustering",
+           legend.labs=c("< 25% Clustering", "> 75% Clustering"),
+           ggtheme = theme_classic(), # Change ggplot2 theme
+           palette = c("#1b4585", "#f9c041"),
+           xlab="Time (months)",
+           xlim=c(0, 150))
+```
+
+T-Helper Proportion Survival Curves
+```{r T-Helper Survival - Effect Sizes}
+th_higher <- quantile(temp$th_prop, 0.75)
+th_lower <- quantile(temp$th_prop, 0.25)
+
+th_temp <- temp %>% mutate(th_quant = 
+                             case_when(th_prop >= th_higher ~
+                                         "> 75% clustering",
+                                       th_prop <= th_lower ~
+                                         "< 25% clustering"))
+sum(th_temp$th_quant == "> 75% clustering", na.rm=T)
+
+th_temp <- th_temp %>% drop_na()
+th_temp$th_quant <- as.factor(th_temp$th_quant)
+
+
+mod <- survfit(Surv(time=survival_time, event=death) ~ th_quant, data=th_temp)
+
+ggsurvplot(mod,
+           pval = TRUE,
+           legend.title="T-Helper Cell Proportion",
+           legend.labs=c("< 25%", "> 75%"),
+           ggtheme = theme_classic(), # Change ggplot2 theme
+           palette = c("#1b4585", "#f9c041"),
+           xlab="Time (months)",
+           xlim=c(0, 150))
+```
+
+Cytotoxic T clustering at 50 micrometers survival curves
+```{r Cytotoxic T Effect Sizes}
+cyto_higher <- quantile(temp$Cytotoxic_T_K50, 0.75)
+cyto_lower <- quantile(temp$Cytotoxic_T_K50, 0.25)
+
+cyto_temp <- temp %>% mutate(cyto_quant = 
+                             case_when(Cytotoxic_T_K50 >= cyto_higher ~
+                                         "> 75% clustering",
+                                       Cytotoxic_T_K50 <= cyto_lower ~
+                                         "< 25% clustering"))
+sum(cyto_temp$cyto_quant == "> 75% clustering", na.rm=T)
+
+cyto_temp <- cyto_temp %>% drop_na()
+cyto_temp$cyto_quant <- as.factor(cyto_temp$cyto_quant)
+
+
+mod <- survfit(Surv(time=survival_time, event=death) ~ cyto_quant, data=cyto_temp)
+
+ggsurvplot(mod,
+           pval = TRUE,
+           legend.title="Cytotoxic T Clustering (50 μm)",
+           legend.labs=c("< 25% Clustering", "> 75% Clustering"),
+           ggtheme = theme_classic(), # Change ggplot2 theme
+           palette = c("#1b4585", "#f9c041"),
+           xlab="Time (months)",
+           xlim=c(0, 150))
+```
+
