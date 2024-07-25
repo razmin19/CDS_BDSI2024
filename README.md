@@ -8,4 +8,4 @@ All of our data is originally from multiplex immunofluorescence images taken of 
 
 We would like to acknowledge Grant Carr, Dr. Junsouk Choi, and Dr. Veera Balandandayuthapani (all from the University of Michigan Biostatistics department) for their support and guidance on this project. We would also like to thank the University of Michigan Big Data Summer Institute 2024.
 
-Please email us at [razmin's UNC email], [niha's UCSD email], or jkaminaga@ucsb.edu for more information or if you have any questions or concerns!
+Please email us at rbari1@unc.edu, [niha's UCSD email], or jkaminaga@ucsb.edu for more information or if you have any questions or concerns!
