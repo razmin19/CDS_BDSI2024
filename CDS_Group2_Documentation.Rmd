@@ -24,34 +24,41 @@ ov <- readRDS("data/ovarianData.RDS")
 ov_MD <- ov$ovarian_metadata
 ov_cells <- ov$ovarian_cells
 
+# Joining cell data & patient medical data sets
 ov_data_total <- left_join(ov_data, ov_MD, by="sample_id")
+# Making parpi_inhibitor binary var
 ov_data_total <- ov_data_total %>% mutate(parpi_inhibitor = case_when( 
                                           parpi_inhibitor == "Y" ~ 1,
                                           parpi_inhibitor == "N" ~ 0))
 
+# remove non-important variables as determined by EDA
 ov_data_total <- ov_data_total %>% select(
   -diagnosis, -recurrent, -tma, -stage, -grade,
-  -time_to_recurrence, -debulking, -BRCA_mutation) # remove non-important variables
-# as determined by EDA
-
-# For loading completed dataframe instead of running
-# spatial statistic calculations
-# ov_data_total <- read.csv("data/Ov_data_final.csv", stringsAsFactors=T)
+  -time_to_recurrence, -debulking, -BRCA_mutation) 
 ```
 
-Add second-order spatial statistic columns to data
-```{r Setting Up Dataframe}
-phenos <- unique((ov_data_total %>% filter(!(pheno %in% "Other")))$pheno)
+For loading completed dataframe 
+```{r}
+ov_data_total <- read.csv("data/Ov_data_final.csv", stringsAsFactors=T)
+```
 
+Running spatial statistic (K function) calculations 
+at multiple radii / Add second-order spatial statistic columns to data
+```{r Setting Up Dataframe}
+# Names of cell types
+phenos <- unique((ov_data_total %>% filter(!(pheno %in% "Other")))$pheno)
+# Unique cell-cell pair combinations
 combs <- combn(phenos, 2)
 
 # create distinct dataset w/ one row for each patient
 ov_unique <- ov_total %>% select(sample_id) %>% distinct()
 
+# adjusting variable names for K-cross functions
 strings <- apply(combs, 2, function(x) gsub(" ", "_", paste0(x, collapse="_")))
 phenos <- sub(" ", "_", phenos)
 
-# add each possible cell type combination at different radii to data
+# add empty columns for K-estimates of each possible cell type
+# at different radii to data
 for (str in strings) {
   y <- paste0(str, "_K20")
   a <- paste0(str, "_K30")
@@ -63,7 +70,8 @@ for (str in strings) {
   ov_unique[[c]] <- NA
 }
 
-# add each cell type at different radii to data
+# add empty columns for K-cross estimates of each possible cell-cell 
+# combinations at different radii to data
 for (str in phenos) {
   y <- paste0(str, "_K20")
   a <- paste0(str, "_K30")
@@ -107,8 +115,33 @@ for (id in 1:nrow(ov_unique)) {
   ov_unique$cyto_prop[id] <- calc_props(temp$pheno, "Cytotoxic T")
   ov_unique$thelp_prop[id] <- calc_props(temp$pheno, "T Helper")
   ov_unique$bcell_prop[id] <- calc_props(temp$pheno, "B Cell")
-  
-  # first for loop calculates the K-cross functions for each combination
+
+  # For-loop to calculate K-estimates for each cell type for each image
+  for (i in 1:5) {
+    # check for counts
+    cell_type <- phenos[i]
+    if (check_counts(temp$pheno, cell_type)) next
+    
+    Kest_val <- MItools::permute.envelope(img_ppp, MItools::Kest,
+                                    funargs=list(i=cell_type), nsim=39)
+    
+    # vector of K-est values for different radii
+    diffs <- Kest_val$obs - Kest_val$mmean
+    
+    cell_type_sub <- gsub(" ", "_", cell_type)
+    
+    # put into dataframe
+    ov_unique[[paste(cell_type_sub, "K20", sep="_")]][id] <-
+      diffs[which.min(abs(Kest_val$r - 20))]
+    ov_unique[[paste(cell_type_sub, "K30", sep="_")]][id] <-
+      diffs[which.min(abs(Kest_val$r - 30))]
+    ov_unique[[paste(cell_type_sub, "K40", sep="_")]][id] <-
+      diffs[which.min(abs(Kest_val$r - 40))]
+    ov_unique[[paste(cell_type_sub, "K50", sep="_")]][id] <-
+      diffs[which.min(abs(Kest_val$r - 50))]
+  }
+
+  # For-loop to calculate the K-cross functions for each combination
   for (i in 1:10) {
     # check for counts
     # if either cell type has less than 6 instances in the image, skip
@@ -136,33 +169,7 @@ for (id in 1:nrow(ov_unique)) {
     ov_unique[[paste(cell_one_sub, cell_two_sub, "K50", sep="_")]][id] <-
       diffs[which.min(abs(Kcross_val$r - 50))]
   }
-  
-  # second for loop calculates K-estimates values for each cell type
-  for (i in 1:5) {
-    # check for counts
-    cell_type <- phenos[i]
-    if (check_counts(temp$pheno, cell_type)) next
-    
-    Kest_val <- MItools::permute.envelope(img_ppp, MItools::Kest,
-                                    funargs=list(i=cell_type), nsim=39)
-    
-    # vector of K-est values for different radii
-    diffs <- Kest_val$obs - Kest_val$mmean
-    
-    cell_type_sub <- gsub(" ", "_", cell_type)
-    
-    # put into dataframe
-    ov_unique[[paste(cell_type_sub, "K20", sep="_")]][id] <-
-      diffs[which.min(abs(Kest_val$r - 20))]
-    ov_unique[[paste(cell_type_sub, "K30", sep="_")]][id] <-
-      diffs[which.min(abs(Kest_val$r - 30))]
-    ov_unique[[paste(cell_type_sub, "K40", sep="_")]][id] <-
-      diffs[which.min(abs(Kest_val$r - 40))]
-    ov_unique[[paste(cell_type_sub, "K50", sep="_")]][id] <-
-      diffs[which.min(abs(Kest_val$r - 50))]
-  }
 }
-
 write.csv(ov_unique, "ov_data_spatial.csv", row.names=F)
 ```
 
@@ -534,7 +541,6 @@ full_df_ordered %>% ggplot(aes(x=reorder(elasticnet_vars,-Freq), y=Freq,
     guides(fill = guide_legend(override.aes = list(shape = NA) ) )
 
 ggsave("radii cox 4.png", width=9,height=6)
-?ggsave
 ```
 
 Plotting some survival curves for various spatial covariates that were selected the most within the Cox models
