@@ -10,5 +10,5 @@ We would like to acknowledge Grant Carr, Dr. Junsouk Choi, and Dr. Veera Balanda
 
 Please email us at rbari1@unc.edu, nghosh@ucsd.edu, or jkaminaga@ucsb.edu for more information or if you have any questions or concerns!
 
-Poster summarizing our process and results:
+Poster summarizing our process and results (winner of the award for Best Statistical Analysis at the Biostatistics Symposium of Southern California 2025):
 <img width="846" alt="image" src="https://github.com/user-attachments/assets/c8e3ffae-8cfa-4516-a656-53b396a5b1a2">
